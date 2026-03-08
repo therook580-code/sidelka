@@ -1,0 +1,463 @@
+import asyncio
+import random
+import logging
+from datetime import datetime, timedelta
+from enum import Enum, auto
+
+from telegram import Update, ReplyKeyboardMarkup, ReplyKeyboardRemove
+from telegram.ext import (
+    Application, CommandHandler, MessageHandler,
+    ConversationHandler, ContextTypes, filters
+)
+
+BOT_TOKEN     = "8105638057:AAF0hHZnRPdJjKi6Ydi6C-BVApA8ltNj5GU"
+CHANNEL_ID    = "@pidor_ebalay"
+DISCUSSION_ID = -1002939020236
+ADMIN_IDS     = [5423348915]  # главный админ — нельзя удалить
+ADMIN_PASSWORD = "gapcjikgiveadminplease"   # ← поменяй на свой пароль
+
+class Step(Enum):
+    PRIZE    = auto()
+    RULES    = auto()
+    DURATION = auto()
+    WINNERS  = auto()
+    CONFIRM  = auto()
+
+REMINDER_TEMPLATE = """⏰ До конца розыгрыша осталось 5 минут!
+
+🎁 {prize}
+
+Последний шанс написать комментарий! 🔥"""
+
+RESULT_TEMPLATE = """🎊 РОЗЫГРЫШ ЗАВЕРШЁН!
+
+🎁 Приз: {prize}
+👥 Всего участников: {total}
+
+🏆 ПОБЕДИТЕЛИ:
+{winners_text}
+
+Поздравляем! Напишите в личку @{admin_username} для получения приза 🎉"""
+
+logging.basicConfig(format="%(asctime)s | %(levelname)s | %(message)s", level=logging.INFO)
+log = logging.getLogger(__name__)
+
+sessions: dict = {}
+
+
+def build_post(prize, rules, winners, duration):
+    rules_block = f"\n📌 Условия участия:\n{rules}\n" if rules else ""
+    return (
+        f"🎁 {prize} 🎁\n"
+        f"{rules_block}\n"
+        f"🏆 Победителей: {winners}\n"
+        f"⏰ Розыгрыш через {duration} мин\n\n"
+        f"🥳 Выберу рандомно — удачи всем! 🍀"
+    )
+
+def msg_link(msg_id):
+    chat_id_str = str(DISCUSSION_ID).replace("-100", "")
+    return f"https://t.me/c/{chat_id_str}/{msg_id}"
+
+def is_admin(uid): return uid in ADMIN_IDS
+def mention(info): return f"@{info['username']}" if info.get("username") else info["name"]
+
+
+class GiveawaySession:
+    def __init__(self, prize, rules, duration_min, winners_count, channel_post_id, discussion_post_id):
+        self.prize              = prize
+        self.rules              = rules
+        self.duration_min       = duration_min
+        self.winners_count      = winners_count
+        self.channel_post_id    = channel_post_id
+        self.discussion_post_id = discussion_post_id
+        self.start_time         = datetime.now()
+        self.end_time           = self.start_time + timedelta(minutes=duration_min)
+        self.all_comments: list = []   # все комментарии подряд
+        self.unique_users: dict = {}   # для подсчёта участников
+
+    def register(self, user_id, name, username, msg_id, msg_time):
+        if msg_time > self.end_time:
+            return
+        # Каждый комментарий = отдельный шанс
+        self.all_comments.append({"uid": user_id, "name": name, "username": username, "msg_id": msg_id})
+        self.unique_users[user_id] = name
+        log.info(f"  -> комментарий #{len(self.all_comments)} от {name}")
+
+    def pick_winners(self):
+        if not self.all_comments:
+            return []
+        pool, chosen = [], set()
+        candidates = self.all_comments[:]
+        random.shuffle(candidates)
+        for entry in candidates:
+            uid = entry["uid"]
+            if uid not in chosen and len(pool) < self.winners_count:
+                chosen.add(uid)
+                pool.append(entry)
+        return pool
+async def find_discussion_post(bot, channel_post_id, retries=5):
+    """Ищем пересланный пост канала в группе обсуждений."""
+    for attempt in range(retries):
+        await asyncio.sleep(2)
+        try:
+            updates = await bot.get_updates(limit=20)
+            for u in reversed(updates):
+                m = u.message
+                if not m or m.chat.id != DISCUSSION_ID:
+                    continue
+                # Пересланный пост от канала
+                if m.sender_chat and m.forward_origin:
+                    log.info(f"Найден пересланный пост: msg_id={m.message_id}")
+                    return m.message_id
+        except Exception as e:
+            log.error(f"find_discussion_post attempt {attempt}: {e}")
+    return None
+
+
+async def cmd_giveaway(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update.effective_user.id):
+        await update.message.reply_text("Только для администраторов.")
+        return ConversationHandler.END
+    if CHANNEL_ID in sessions:
+        await update.message.reply_text("Уже идёт розыгрыш! Останови его командой /stop")
+        return ConversationHandler.END
+    ctx.user_data.clear()
+    await update.message.reply_text(
+        "Шаг 1 из 4 - Что разыгрываем?\n\nНапиши название приза:",
+        reply_markup=ReplyKeyboardRemove()
+    )
+    return Step.PRIZE
+
+
+async def step_prize(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    ctx.user_data["prize"] = update.message.text.strip()
+    await update.message.reply_text(
+        f"Приз: {ctx.user_data['prize']}\n\nШаг 2 из 4 - Условия участия\n\nНапиши условия или выбери вариант:",
+        reply_markup=ReplyKeyboardMarkup(
+            [["Написать комментарий + реакция, однотипные нельзя"],
+             ["Написать комментарий под постом"],
+             ["Нету"]],
+            resize_keyboard=True, one_time_keyboard=True
+        )
+    )
+    return Step.RULES
+
+
+async def step_rules(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    text = update.message.text.strip()
+    ctx.user_data["rules"] = "" if text == "Нету" else text
+    await update.message.reply_text(
+        "Шаг 3 из 4 - Время розыгрыша\n\nСколько минут?",
+        reply_markup=ReplyKeyboardMarkup(
+            [["15", "30", "60"], ["120", "1440"]],
+            resize_keyboard=True, one_time_keyboard=True
+        )
+    )
+    return Step.DURATION
+
+
+async def step_duration(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    try:
+        duration = int(update.message.text.strip())
+        if not (1 <= duration <= 10080): raise ValueError
+    except ValueError:
+        await update.message.reply_text("Введи число от 1 до 10080:")
+        return Step.DURATION
+    ctx.user_data["duration"] = duration
+    await update.message.reply_text(
+        f"Время: {duration} мин\n\nШаг 4 из 4 - Сколько победителей?",
+        reply_markup=ReplyKeyboardMarkup(
+            [["1", "2", "3"], ["5", "10"]],
+            resize_keyboard=True, one_time_keyboard=True
+        )
+    )
+    return Step.WINNERS
+
+
+async def step_winners(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    try:
+        winners = int(update.message.text.strip())
+        if not (1 <= winners <= 100): raise ValueError
+    except ValueError:
+        await update.message.reply_text("Введи число от 1 до 100:")
+        return Step.WINNERS
+    ctx.user_data["winners"] = winners
+    d = ctx.user_data
+    preview = build_post(d["prize"], d["rules"], d["winners"], d["duration"])
+    await update.message.reply_text(
+        f"Предпросмотр поста:\n\n{preview}\n\n-----------------\nПубликуем в канал?",
+        reply_markup=ReplyKeyboardMarkup(
+            [["Опубликовать", "Отмена"]],
+            resize_keyboard=True, one_time_keyboard=True
+        )
+    )
+    return Step.CONFIRM
+
+
+async def step_confirm(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if "Отмена" in update.message.text:
+        await update.message.reply_text("Создание отменено.", reply_markup=ReplyKeyboardRemove())
+        ctx.user_data.clear()
+        return ConversationHandler.END
+
+    d, user = ctx.user_data, update.effective_user
+    post_text = build_post(d["prize"], d["rules"], d["winners"], d["duration"])
+
+    try:
+        channel_msg = await ctx.bot.send_message(chat_id=CHANNEL_ID, text=post_text)
+    except Exception as e:
+        await update.message.reply_text(
+            f"Не могу написать в канал:\n{e}\n\nПроверь, что бот — администратор канала.",
+            reply_markup=ReplyKeyboardRemove()
+        )
+        return ConversationHandler.END
+
+    # Ищем пересланный пост в группе обсуждений
+    discussion_post_id = await find_discussion_post(ctx.bot, channel_msg.message_id)
+    log.info(f"discussion_post_id={discussion_post_id}, channel_post_id={channel_msg.message_id}")
+
+    session = GiveawaySession(
+        prize=d["prize"], rules=d["rules"],
+        duration_min=d["duration"], winners_count=d["winners"],
+        channel_post_id=channel_msg.message_id,
+        discussion_post_id=discussion_post_id
+    )
+    sessions[CHANNEL_ID] = session
+
+    # Первый комментарий — reply на пост в группе
+    try:
+        await ctx.bot.send_message(
+            chat_id=DISCUSSION_ID,
+            reply_to_message_id=discussion_post_id,
+            text=(
+                f"🎁 Розыгрыш начался!\n\n"
+                f"💬 Пиши комментарий прямо здесь чтобы участвовать\n"
+                f"⏰ Время: {d['duration']} мин\n"
+                f"🏆 Победителей: {d['winners']}\n\n"
+                f"⚡️ Больше шансов у тех кто напишет в первую и последнюю минуту!"
+            )
+        )
+        log.info("Первый комментарий отправлен как reply на пост")
+    except Exception as e:
+        log.error(f"First comment error: {e}")
+
+    await update.message.reply_text(
+        f"Пост опубликован!\n\nПриз: {d['prize']}\nВремя: {d['duration']} мин\nПобедителей: {d['winners']}\n\nРезультаты пришлю автоматически.",
+        reply_markup=ReplyKeyboardRemove()
+    )
+
+    duration_sec = d["duration"] * 60
+    if duration_sec > 300:
+        ctx.job_queue.run_once(job_reminder, when=duration_sec - 300,
+            data={"prize": d["prize"]}, name=f"reminder_{CHANNEL_ID}")
+    ctx.job_queue.run_once(job_finish, when=duration_sec,
+        data={"prize": d["prize"], "admin_id": user.id,
+              "admin_username": user.username or user.first_name},
+        name=f"finish_{CHANNEL_ID}")
+
+    ctx.user_data.clear()
+    return ConversationHandler.END
+
+
+async def cmd_cancel(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    ctx.user_data.clear()
+    await update.message.reply_text("Создание отменено.", reply_markup=ReplyKeyboardRemove())
+    return ConversationHandler.END
+
+
+async def cmd_stop(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update.effective_user.id):
+        await update.message.reply_text("Только для администраторов.")
+        return
+    if CHANNEL_ID not in sessions:
+        await update.message.reply_text("Активных розыгрышей нет.")
+        return
+    sessions.pop(CHANNEL_ID)
+    for name in [f"reminder_{CHANNEL_ID}", f"finish_{CHANNEL_ID}"]:
+        for j in ctx.job_queue.get_jobs_by_name(name): j.schedule_removal()
+    await update.message.reply_text("Розыгрыш остановлен.")
+
+
+async def handle_comment(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    msg = update.message
+    if not msg: return
+
+    # Игнорируем пересланные посты из канала (автокопия)
+    if msg.forward_origin is not None: return
+
+    session = sessions.get(CHANNEL_ID)
+    if not session: return
+
+    # Анонимный админ (sender_chat) или обычный юзер
+    if msg.sender_chat is not None:
+        uid      = msg.sender_chat.id
+        name     = msg.sender_chat.title or "Аноним"
+        username = msg.sender_chat.username or ""
+    else:
+        user = msg.from_user
+        if not user or user.is_bot: return
+        uid      = user.id
+        name     = user.full_name
+        username = user.username or ""
+
+    log.info(f"Comment from {name} (id={uid})")
+
+    now = datetime.now()
+    session.register(uid, name, username, msg.message_id, now)
+    log.info(f"Comment ACCEPTED: {name}")
+
+
+async def job_reminder(ctx: ContextTypes.DEFAULT_TYPE):
+    if CHANNEL_ID not in sessions: return
+    session = sessions.get(CHANNEL_ID)
+    try:
+        await ctx.bot.send_message(
+            chat_id=DISCUSSION_ID,
+            reply_to_message_id=session.discussion_post_id,
+            text=REMINDER_TEMPLATE.format(prize=ctx.job.data["prize"])
+        )
+    except Exception as e:
+        log.error(f"Reminder: {e}")
+
+
+async def job_finish(ctx: ContextTypes.DEFAULT_TYPE):
+    data = ctx.job.data
+    session = sessions.pop(CHANNEL_ID, None)
+    if not session: return
+
+    winners = session.pick_winners()
+
+    if winners:
+        lines = []
+        for i, w in enumerate(winners, 1):
+            tag  = mention(w)
+            link = msg_link(w["msg_id"])
+            lines.append(f"{i}. {tag}\n   Сообщение: {link}")
+        winners_text = "\n\n".join(lines)
+    else:
+        winners_text = "Никто не участвовал"
+
+    result = RESULT_TEMPLATE.format(
+        prize=session.prize,
+        total=len(session.unique_users),
+        winners_text=winners_text,
+        admin_username=data["admin_username"]
+    )
+
+    log.info(f"Отправляю итоги как reply на discussion_post_id={session.discussion_post_id}")
+    try:
+        await ctx.bot.send_message(
+            chat_id=DISCUSSION_ID,
+            reply_to_message_id=session.discussion_post_id,
+            text=result,
+            disable_web_page_preview=True
+        )
+        log.info("Итоги отправлены!")
+    except Exception as e:
+        log.error(f"Finish error: {e}")
+
+    try:
+        await ctx.bot.send_message(
+            chat_id=data["admin_id"],
+            text=f"Розыгрыш завершён!\n\n{result}",
+            disable_web_page_preview=True
+        )
+    except Exception as e:
+        log.error(f"Admin DM error: {e}")
+
+    log.info(f"Done. Winners: {[w['name'] for w in winners]}")
+
+async def cmd_admin(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    if not user:
+        return
+    args = ctx.args
+
+    if not args:
+        await update.message.reply_text("Использование: /admin [пароль]")
+        return
+
+    if args[0] != ADMIN_PASSWORD:
+        await update.message.reply_text("❌ Неверный пароль.")
+        return
+
+    if user.id in ADMIN_IDS:
+        await update.message.reply_text("✅ Ты уже администратор.")
+        return
+
+    ADMIN_IDS.append(user.id)
+    log.info(f"Новый админ: {user.full_name} ({user.id})")
+    await update.message.reply_text(
+        f"✅ Ты теперь администратор!\n\n"
+        f"Доступные команды:\n"
+        f"/giveaway — создать розыгрыш\n"
+        f"/stop — остановить розыгрыш\n"
+        f"/admins — список администраторов"
+    )
+
+
+async def cmd_admins(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update.effective_user.id):
+        await update.message.reply_text("❌ Только для администраторов.")
+        return
+    lines = [f"{i+1}. {uid}" + (" [root]" if i==0 else "") for i, uid in enumerate(ADMIN_IDS)]
+    await update.message.reply_text("👥 Администраторы:\n" + "\n".join(lines))
+
+
+async def cmd_removeadmin(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_IDS[0]:
+        await update.message.reply_text("❌ Только главный администратор может удалять.")
+        return
+    args = ctx.args
+    if not args:
+        await update.message.reply_text("Использование: /removeadmin [user_id]")
+        return
+    try:
+        uid = int(args[0])
+    except ValueError:
+        await update.message.reply_text("❌ Введи числовой user_id.")
+        return
+    if uid == ADMIN_IDS[0]:
+        await update.message.reply_text("❌ Нельзя удалить главного администратора.")
+        return
+    if uid in ADMIN_IDS:
+        ADMIN_IDS.remove(uid)
+        await update.message.reply_text(f"✅ Админ {uid} удалён.")
+    else:
+        await update.message.reply_text("❌ Такого админа нет.")
+
+
+
+def main():
+    app = Application.builder().token(BOT_TOKEN).build()
+
+    conv = ConversationHandler(
+        entry_points=[CommandHandler("giveaway", cmd_giveaway)],
+        states={
+            Step.PRIZE:    [MessageHandler(filters.TEXT & ~filters.COMMAND, step_prize)],
+            Step.RULES:    [MessageHandler(filters.TEXT & ~filters.COMMAND, step_rules)],
+            Step.DURATION: [MessageHandler(filters.TEXT & ~filters.COMMAND, step_duration)],
+            Step.WINNERS:  [MessageHandler(filters.TEXT & ~filters.COMMAND, step_winners)],
+            Step.CONFIRM:  [MessageHandler(filters.TEXT & ~filters.COMMAND, step_confirm)],
+        },
+        fallbacks=[CommandHandler("cancel", cmd_cancel)],
+        per_user=True, per_chat=True
+    )
+
+    app.add_handler(conv)
+    app.add_handler(CommandHandler("stop", cmd_stop))
+    app.add_handler(CommandHandler("admin", cmd_admin))
+    app.add_handler(CommandHandler("admins", cmd_admins))
+    app.add_handler(CommandHandler("removeadmin", cmd_removeadmin))
+    app.add_handler(MessageHandler(
+        filters.Chat(DISCUSSION_ID) & filters.TEXT & ~filters.COMMAND & ~filters.UpdateType.EDITED_MESSAGE,
+        handle_comment
+    ))
+
+    log.info("Bot started!")
+    app.run_polling(drop_pending_updates=True)
+
+
+if __name__ == "__main__":
+    main()
