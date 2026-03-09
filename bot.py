@@ -13,8 +13,7 @@ from telegram.ext import (
     ConversationHandler, ContextTypes, filters
 )
 
-import os
-BOT_TOKEN = os.environ.get("BOT_TOKEN")
+BOT_TOKEN      = "8105638057:AAF0hHZnRPdJjKi6Ydi6C-BVApA8ltNj5GU"
 CHANNEL_ID     = "@pidor_ebalay"
 DISCUSSION_ID  = -1002939020236
 ADMIN_IDS      = [5423348915]
@@ -218,8 +217,10 @@ async def step_confirm(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             )
         )
         # Реальный thread_id берём из ответа
-        discussion_post_id = first_msg.message_thread_id or channel_msg.message_id
+        # message_thread_id первого сообщения = ID пересланного поста в группе
+        discussion_post_id = first_msg.message_thread_id if first_msg.message_thread_id else first_msg.reply_to_message.message_id if first_msg.reply_to_message else first_msg.message_id
         log.info(f"Первый комментарий отправлен, thread_id={discussion_post_id}")
+        log.info(f"DEBUG first_msg: id={first_msg.message_id}, thread_id={first_msg.message_thread_id}, reply_to={first_msg.reply_to_message and first_msg.reply_to_message.message_id}")
     except Exception as e:
         log.error(f"First comment error: {e}")
         discussion_post_id = channel_msg.message_id
