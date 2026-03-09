@@ -117,7 +117,8 @@ class GiveawaySession:
         # Telegram даёт разные ID посту в канале и треду в группе.
         # Правильный thread_id мы получим только из msg.message_thread_id
         # первого входящего комментария.
-        self.discussion_post_id = None
+        self.discussion_post_id = None  # thread_id (message_thread_id)
+        self.group_post_id      = None  # реальный message_id поста в группе (для reply)
         self.welcome_sent       = False
         self.start_time         = datetime.now()
         self.end_time           = self.start_time + timedelta(minutes=duration_min)
@@ -492,11 +493,17 @@ async def handle_comment(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if msg.message_thread_id is not None and not session.welcome_sent:
         session.discussion_post_id = msg.message_thread_id
         session.welcome_sent = True
-        log.info(f"Thread ID получен из первого комментария: {session.discussion_post_id}")
+        # group_post_id — ID поста в группе обсуждений (для reply_to_message_id)
+        if msg.reply_to_message:
+            session.group_post_id = msg.reply_to_message.message_id
+        else:
+            session.group_post_id = msg.message_thread_id
+        log.info(f"Thread ID: {session.discussion_post_id}, group_post_id: {session.group_post_id}")
         try:
             await ctx.bot.send_message(
                 chat_id=session.discussion_id,
                 message_thread_id=session.discussion_post_id,
+                reply_to_message_id=session.group_post_id,
                 text=(
                     f"🎁 Розыгрыш начался!\n\n"
                     f"💬 Пиши комментарий прямо здесь чтобы участвовать\n"
@@ -542,6 +549,7 @@ async def job_reminder(ctx: ContextTypes.DEFAULT_TYPE):
         await ctx.bot.send_message(
             chat_id=session.discussion_id,
             message_thread_id=session.discussion_post_id,
+            reply_to_message_id=session.group_post_id,
             text=REMINDER_TEMPLATE.format(prize=session.prize)
         )
     except Exception as e:
@@ -576,6 +584,7 @@ async def job_finish(ctx: ContextTypes.DEFAULT_TYPE):
             await ctx.bot.send_message(
                 chat_id=session.discussion_id,
                 message_thread_id=session.discussion_post_id,
+                reply_to_message_id=session.group_post_id,
                 text=result,
                 disable_web_page_preview=True
             )
