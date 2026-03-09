@@ -14,7 +14,7 @@ BOT_TOKEN     = "8105638057:AAF0hHZnRPdJjKi6Ydi6C-BVApA8ltNj5GU"
 CHANNEL_ID    = "@pidor_ebalay"
 DISCUSSION_ID = -1002939020236
 ADMIN_IDS     = [5423348915]  # главный админ — нельзя удалить
-ADMIN_PASSWORD = "gapcjikgiveadminplease"   # ← поменяй на свой пароль
+ADMIN_PASSWORD = "в"   # ← поменяй на свой пароль
 
 class Step(Enum):
     PRIZE    = auto()
