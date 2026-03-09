@@ -246,6 +246,22 @@ async def step_confirm(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     return ConversationHandler.END
 
 
+async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "👋 Привет! Я бот для розыгрышей.\n\n"
+        "📋 Команды:\n"
+        "/giveaway — создать розыгрыш\n"
+        "/stop — остановить розыгрыш\n"
+        "/admin [пароль] — стать администратором\n"
+        "/admins — список администраторов\n\n"
+        "❓ Как работает розыгрыш:\n"
+        "• Бот публикует пост в канале\n"
+        "• Люди пишут комментарии под постом\n"
+        "• Чем больше комментариев — тем больше шансов\n"
+        "• По истечении времени бот рандомно выбирает победителя"
+    )
+
+
 async def cmd_cancel(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     ctx.user_data.clear()
     await update.message.reply_text("Создание отменено.", reply_markup=ReplyKeyboardRemove())
@@ -429,6 +445,7 @@ def main():
     )
 
     app.add_handler(conv)
+    app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("stop", cmd_stop))
     app.add_handler(CommandHandler("admin", cmd_admin))
     app.add_handler(CommandHandler("admins", cmd_admins))
