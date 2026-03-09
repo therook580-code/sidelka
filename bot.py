@@ -198,16 +198,18 @@ async def step_confirm(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         )
         return ConversationHandler.END
 
-    # Ждём чтобы Telegram создал тред в группе обсуждений
-    await asyncio.sleep(4)
+    # Ждём чтобы Telegram создал пересланный пост в группе
+    await asyncio.sleep(3)
 
-    # Отправляем первый комментарий используя message_thread_id = ID поста в канале
-    # Telegram автоматически привязывает тред по этому ID
-    discussion_post_id = None
+    # Пересланный пост в группе обсуждений всегда имеет message_id = channel_post_id - 1
+    discussion_post_id = channel_msg.message_id - 1
+    log.info(f"discussion_post_id={discussion_post_id} (channel_post_id={channel_msg.message_id})")
+
+    # Отправляем первый комментарий с правильным thread_id
     try:
-        first_msg = await ctx.bot.send_message(
+        await ctx.bot.send_message(
             chat_id=DISCUSSION_ID,
-            message_thread_id=channel_msg.message_id,
+            message_thread_id=discussion_post_id,
             text=(
                 f"🎁 Розыгрыш начался!\n\n"
                 f"💬 Пиши комментарий прямо здесь чтобы участвовать\n"
@@ -216,14 +218,9 @@ async def step_confirm(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 f"⚡️ Больше шансов у тех кто напишет больше комментариев!"
             )
         )
-        # Реальный thread_id берём из ответа
-        # message_thread_id первого сообщения = ID пересланного поста в группе
-        discussion_post_id = first_msg.message_thread_id if first_msg.message_thread_id else first_msg.reply_to_message.message_id if first_msg.reply_to_message else first_msg.message_id
-        log.info(f"Первый комментарий отправлен, thread_id={discussion_post_id}")
-        log.info(f"DEBUG first_msg: id={first_msg.message_id}, thread_id={first_msg.message_thread_id}, reply_to={first_msg.reply_to_message and first_msg.reply_to_message.message_id}")
+        log.info(f"Первый комментарий отправлен в thread_id={discussion_post_id}")
     except Exception as e:
         log.error(f"First comment error: {e}")
-        discussion_post_id = channel_msg.message_id
 
     session = GiveawaySession(
         prize=d["prize"], rules=d["rules"],
