@@ -198,29 +198,10 @@ async def step_confirm(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         )
         return ConversationHandler.END
 
-    # Ждём чтобы Telegram создал пересланный пост в группе
-    await asyncio.sleep(3)
-
-    # Пересланный пост в группе обсуждений всегда имеет message_id = channel_post_id - 1
-    discussion_post_id = channel_msg.message_id - 1
-    log.info(f"discussion_post_id={discussion_post_id} (channel_post_id={channel_msg.message_id})")
-
-    # Отправляем первый комментарий с правильным thread_id
-    try:
-        await ctx.bot.send_message(
-            chat_id=DISCUSSION_ID,
-            message_thread_id=discussion_post_id,
-            text=(
-                f"🎁 Розыгрыш начался!\n\n"
-                f"💬 Пиши комментарий прямо здесь чтобы участвовать\n"
-                f"⏰ Время: {d['duration']} мин\n"
-                f"🏆 Победителей: {d['winners']}\n\n"
-                f"⚡️ Больше шансов у тех кто напишет больше комментариев!"
-            )
-        )
-        log.info(f"Первый комментарий отправлен в thread_id={discussion_post_id}")
-    except Exception as e:
-        log.error(f"First comment error: {e}")
+    # discussion_post_id будет получен из первого комментария участника
+    # Пока используем None — обновится в handle_comment
+    discussion_post_id = None
+    log.info(f"channel_post_id={channel_msg.message_id}, ждём первого комментария для получения thread_id")
 
     session = GiveawaySession(
         prize=d["prize"], rules=d["rules"],
@@ -293,10 +274,25 @@ async def handle_comment(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     session = sessions.get(CHANNEL_ID)
     if not session: return
 
-    # Обновляем discussion_post_id из реального thread_id входящих сообщений
-    if msg.message_thread_id and session.discussion_post_id != msg.message_thread_id:
-        log.info(f"Обновляем discussion_post_id: {session.discussion_post_id} -> {msg.message_thread_id}")
+    # Обновляем discussion_post_id из реального thread_id первого комментария
+    if msg.message_thread_id and session.discussion_post_id is None:
         session.discussion_post_id = msg.message_thread_id
+        log.info(f"Thread ID получен: {session.discussion_post_id}")
+        # Теперь отправляем приветственный комментарий под постом
+        try:
+            await ctx.bot.send_message(
+                chat_id=DISCUSSION_ID,
+                message_thread_id=session.discussion_post_id,
+                text=(
+                    f"🎁 Розыгрыш начался!\n\n"
+                    f"💬 Пиши комментарий прямо здесь чтобы участвовать\n"
+                    f"⏰ Время: {session.duration_min} мин\n"
+                    f"🏆 Победителей: {session.winners_count}\n\n"
+                    f"⚡️ Больше шансов у тех кто напишет больше комментариев!"
+                )
+            )
+        except Exception as e:
+            log.error(f"Welcome comment error: {e}")
 
     if msg.sender_chat is not None:
         uid      = msg.sender_chat.id
