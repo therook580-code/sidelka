@@ -1,3 +1,6 @@
+import threading
+from http.server import HTTPServer, BaseHTTPRequestHandler
+
 import asyncio
 import random
 import logging
@@ -10,7 +13,8 @@ from telegram.ext import (
     ConversationHandler, ContextTypes, filters
 )
 
-BOT_TOKEN      = "8105638057:AAF0hHZnRPdJjKi6Ydi6C-BVApA8ltNj5GU"
+import os
+BOT_TOKEN = os.environ.get("BOT_TOKEN")
 CHANNEL_ID     = "@pidor_ebalay"
 DISCUSSION_ID  = -1002939020236
 ADMIN_IDS      = [5423348915]
@@ -427,6 +431,17 @@ async def cmd_removeadmin(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     else:
         await update.message.reply_text("❌ Такого админа нет.")
 
+def run_health_server():
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(b"OK")
+        def log_message(self, *args): pass
+    port = int(__import__("os").environ.get("PORT", 8080))
+    HTTPServer(("", port), Handler).serve_forever()
+
+
 
 def main():
     app = Application.builder().token(BOT_TOKEN).build()
@@ -455,6 +470,7 @@ def main():
         handle_comment
     ))
 
+    threading.Thread(target=run_health_server, daemon=True).start()
     log.info("Bot started!")
     app.run_polling(drop_pending_updates=True)
 
