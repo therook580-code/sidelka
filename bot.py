@@ -20,6 +20,7 @@ CHANNELS_FILE  = "channels.json"
 
 class Step(Enum):
     PRIZE          = auto()
+    PHOTO          = auto()
     RULES          = auto()
     DURATION       = auto()
     WINNERS        = auto()
@@ -48,7 +49,7 @@ RESULT_TEMPLATE = """🎊 РОЗЫГРЫШ ЗАВЕРШЁН!
 logging.basicConfig(format="%(asctime)s | %(levelname)s | %(message)s", level=logging.INFO)
 log = logging.getLogger(__name__)
 
-sessions: dict = {}  # channel_id -> GiveawaySession
+sessions: dict = {}
 
 
 # ─── Каналы ──────────────────────────────────────────────────────────────────
@@ -113,12 +114,8 @@ class GiveawaySession:
         self.discussion_id      = discussion_id
         self.admin_id           = admin_id
         self.admin_username     = admin_username
-        # ── КЛЮЧЕВОЕ: discussion_post_id = None до первого комментария ──
-        # Telegram даёт разные ID посту в канале и треду в группе.
-        # Правильный thread_id мы получим только из msg.message_thread_id
-        # первого входящего комментария.
-        self.discussion_post_id = None  # thread_id (message_thread_id)
-        self.group_post_id      = None  # реальный message_id поста в группе (для reply)
+        self.discussion_post_id = None
+        self.group_post_id      = None
         self.welcome_sent       = False
         self.start_time         = datetime.now()
         self.end_time           = self.start_time + timedelta(minutes=duration_min)
@@ -229,7 +226,7 @@ async def addchannel_username(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return ConversationHandler.END
 
     if discussion_id:
-        disc_text = "✅ Группа обсуждений подключена"
+        disc_text = "✅ Группа обсуждений подключена автоматически"
     else:
         disc_text = (
             "⚠️ Группа обсуждений не найдена!\n"
@@ -285,38 +282,75 @@ async def cmd_giveaway(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         ctx.user_data["channel"] = available[0]
         await update.message.reply_text(
             f"📢 Канал: {available[0].get('title', available[0]['channel_id'])}\n\n"
-            f"Шаг 1 из 4 — Что разыгрываем?\n\nНапиши название приза:",
+            f"Шаг 1 из 5 — Что разыгрываем?\n\nНапиши название приза:",
             reply_markup=ReplyKeyboardRemove()
         )
         return Step.PRIZE
 
+    # Несколько каналов — используем обычные кнопки (не инлайн!) чтобы не ломать ConversationHandler
     ctx.user_data["available_channels"] = available
-    keyboard = [[InlineKeyboardButton(ch.get("title", ch["channel_id"]), callback_data=f"sel_ch:{i}")]
-                for i, ch in enumerate(available)]
-    await update.message.reply_text("📢 В какой канал публикуем розыгрыш?",
-                                    reply_markup=InlineKeyboardMarkup(keyboard))
+    buttons = [[ch.get("title", ch["channel_id"])] for ch in available]
+    await update.message.reply_text(
+        "📢 В какой канал публикуем розыгрыш?",
+        reply_markup=ReplyKeyboardMarkup(buttons, resize_keyboard=True, one_time_keyboard=True)
+    )
     return Step.SELECT_CHANNEL
 
-async def callback_select_channel(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    idx = int(query.data.split(":")[1])
+
+async def step_select_channel(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    text = update.message.text.strip()
     available = ctx.user_data.get("available_channels", [])
-    if idx >= len(available):
-        await query.edit_message_text("❌ Ошибка выбора.")
-        return ConversationHandler.END
-    ctx.user_data["channel"] = available[idx]
-    ch = available[idx]
-    await query.edit_message_text(
-        f"📢 Канал: {ch.get('title', ch['channel_id'])}\n\n"
-        f"Шаг 1 из 4 — Что разыгрываем?\n\nНапиши название приза:"
+    selected = next((ch for ch in available if ch.get("title", ch["channel_id"]) == text), None)
+    if not selected:
+        buttons = [[ch.get("title", ch["channel_id"])] for ch in available]
+        await update.message.reply_text(
+            "❌ Выбери канал из списка:",
+            reply_markup=ReplyKeyboardMarkup(buttons, resize_keyboard=True, one_time_keyboard=True)
+        )
+        return Step.SELECT_CHANNEL
+    ctx.user_data["channel"] = selected
+    await update.message.reply_text(
+        f"📢 Канал: {selected.get('title', selected['channel_id'])}\n\n"
+        f"Шаг 1 из 5 — Что разыгрываем?\n\nНапиши название приза:",
+        reply_markup=ReplyKeyboardRemove()
     )
     return Step.PRIZE
 
+
 async def step_prize(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     ctx.user_data["prize"] = update.message.text.strip()
+    ctx.user_data["photo_id"] = None  # по умолчанию нет фото
     await update.message.reply_text(
-        f"Приз: {ctx.user_data['prize']}\n\nШаг 2 из 4 — Условия участия\n\nНапиши условия или выбери вариант:",
+        f"Приз: {ctx.user_data['prize']}\n\n"
+        f"Шаг 2 из 5 — Фото для поста\n\n"
+        f"Отправь картинку или нажми «Без фото»:",
+        reply_markup=ReplyKeyboardMarkup(
+            [["Без фото"]],
+            resize_keyboard=True, one_time_keyboard=True
+        )
+    )
+    return Step.PHOTO
+
+
+async def step_photo(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    # Пользователь отправил фото
+    if update.message.photo:
+        photo = update.message.photo[-1]  # берём наибольшее качество
+        ctx.user_data["photo_id"] = photo.file_id
+        await update.message.reply_text(
+            "✅ Фото сохранено!\n\nШаг 3 из 5 — Условия участия:",
+            reply_markup=ReplyKeyboardMarkup(
+                [["Написать комментарий + реакция, однотипные нельзя"],
+                 ["Написать комментарий под постом"], ["Нету"]],
+                resize_keyboard=True, one_time_keyboard=True
+            )
+        )
+        return Step.RULES
+
+    # Пользователь нажал «Без фото» или написал текст
+    ctx.user_data["photo_id"] = None
+    await update.message.reply_text(
+        "Шаг 3 из 5 — Условия участия:",
         reply_markup=ReplyKeyboardMarkup(
             [["Написать комментарий + реакция, однотипные нельзя"],
              ["Написать комментарий под постом"], ["Нету"]],
@@ -325,17 +359,19 @@ async def step_prize(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     )
     return Step.RULES
 
+
 async def step_rules(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.strip()
     ctx.user_data["rules"] = "" if text == "Нету" else text
     await update.message.reply_text(
-        "Шаг 3 из 4 — Время розыгрыша\n\nСколько минут?",
+        "Шаг 4 из 5 — Время розыгрыша\n\nСколько минут?",
         reply_markup=ReplyKeyboardMarkup(
             [["15", "30", "60"], ["120", "1440"]],
             resize_keyboard=True, one_time_keyboard=True
         )
     )
     return Step.DURATION
+
 
 async def step_duration(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     try:
@@ -346,13 +382,14 @@ async def step_duration(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return Step.DURATION
     ctx.user_data["duration"] = duration
     await update.message.reply_text(
-        f"Время: {duration} мин\n\nШаг 4 из 4 — Сколько победителей?",
+        f"Время: {duration} мин\n\nШаг 5 из 5 — Сколько победителей?",
         reply_markup=ReplyKeyboardMarkup(
             [["1", "2", "3"], ["5", "10"]],
             resize_keyboard=True, one_time_keyboard=True
         )
     )
     return Step.WINNERS
+
 
 async def step_winners(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     try:
@@ -365,14 +402,17 @@ async def step_winners(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     d = ctx.user_data
     ch = d["channel"]
     preview = build_post(d["prize"], d["rules"], d["winners"], d["duration"])
+    photo_status = "✅ С фото" if d.get("photo_id") else "❌ Без фото"
     await update.message.reply_text(
-        f"📢 Канал: {ch.get('title', ch['channel_id'])}\n\n"
-        f"Предпросмотр:\n\n{preview}\n\n-----------------\nПубликуем?",
+        f"📢 Канал: {ch.get('title', ch['channel_id'])}\n"
+        f"🖼 Фото: {photo_status}\n\n"
+        f"Предпросмотр текста:\n\n{preview}\n\n-----------------\nПубликуем?",
         reply_markup=ReplyKeyboardMarkup(
             [["Опубликовать", "Отмена"]], resize_keyboard=True, one_time_keyboard=True
         )
     )
     return Step.CONFIRM
+
 
 async def step_confirm(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if "Отмена" in update.message.text:
@@ -393,15 +433,25 @@ async def step_confirm(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return ConversationHandler.END
 
     post_text = build_post(d["prize"], d["rules"], d["winners"], d["duration"])
+    photo_id  = d.get("photo_id")
+
     try:
-        channel_msg = await ctx.bot.send_message(chat_id=ch["channel_id"], text=post_text)
+        if photo_id:
+            channel_msg = await ctx.bot.send_photo(
+                chat_id=ch["channel_id"],
+                photo=photo_id,
+                caption=post_text
+            )
+        else:
+            channel_msg = await ctx.bot.send_message(
+                chat_id=ch["channel_id"],
+                text=post_text
+            )
     except Exception as e:
         await update.message.reply_text(f"❌ Не могу написать в канал:\n{e}", reply_markup=ReplyKeyboardRemove())
         return ConversationHandler.END
 
-    log.info(f"Пост опубликован: channel_post_id={channel_msg.message_id}")
-    log.info(f"discussion_id={discussion_id}")
-    log.info(f"discussion_post_id будет получен из первого комментария")
+    log.info(f"Пост опубликован: channel_post_id={channel_msg.message_id}, discussion_id={discussion_id}")
 
     session = GiveawaySession(
         prize=d["prize"], rules=d["rules"],
@@ -477,7 +527,6 @@ async def handle_comment(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not msg: return
     if msg.forward_origin is not None: return
 
-    # Ищем сессию по discussion_id
     session = None
     for ch_id, sess in sessions.items():
         if msg.chat.id == sess.discussion_id:
@@ -485,15 +534,9 @@ async def handle_comment(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             break
     if not session: return
 
-    # ── КЛЮЧЕВОЙ МОМЕНТ ──────────────────────────────────────────────────────
-    # Первый комментарий под постом даёт нам правильный thread_id.
-    # channel_msg.message_id и msg.message_thread_id — РАЗНЫЕ числа!
-    # Telegram создаёт тред в группе обсуждений со своим ID.
-    # ─────────────────────────────────────────────────────────────────────────
     if msg.message_thread_id is not None and not session.welcome_sent:
         session.discussion_post_id = msg.message_thread_id
         session.welcome_sent = True
-        # group_post_id — ID поста в группе обсуждений (для reply_to_message_id)
         if msg.reply_to_message:
             session.group_post_id = msg.reply_to_message.message_id
         else:
@@ -503,7 +546,6 @@ async def handle_comment(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             await ctx.bot.send_message(
                 chat_id=session.discussion_id,
                 message_thread_id=session.discussion_post_id,
-                reply_to_message_id=session.group_post_id,
                 text=(
                     f"🎁 Розыгрыш начался!\n\n"
                     f"💬 Пиши комментарий прямо здесь чтобы участвовать\n"
@@ -515,15 +557,11 @@ async def handle_comment(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         except Exception as e:
             log.error(f"Welcome comment error: {e}")
 
-    # Игнорируем сообщения не из треда нашего поста
     if session.discussion_post_id and msg.message_thread_id != session.discussion_post_id:
         return
-
-    # Если thread_id ещё не получен и сообщение не в треде — пропускаем
     if session.discussion_post_id is None:
         return
 
-    # Получаем данные участника
     if msg.sender_chat is not None:
         uid      = msg.sender_chat.id
         name     = msg.sender_chat.title or "Аноним"
@@ -549,7 +587,6 @@ async def job_reminder(ctx: ContextTypes.DEFAULT_TYPE):
         await ctx.bot.send_message(
             chat_id=session.discussion_id,
             message_thread_id=session.discussion_post_id,
-            reply_to_message_id=session.group_post_id,
             text=REMINDER_TEMPLATE.format(prize=session.prize)
         )
     except Exception as e:
@@ -578,13 +615,11 @@ async def job_finish(ctx: ContextTypes.DEFAULT_TYPE):
         admin_username=session.admin_username
     )
 
-    # Итоги под постом
     if session.discussion_post_id:
         try:
             await ctx.bot.send_message(
                 chat_id=session.discussion_id,
                 message_thread_id=session.discussion_post_id,
-                reply_to_message_id=session.group_post_id,
                 text=result,
                 disable_web_page_preview=True
             )
@@ -594,7 +629,6 @@ async def job_finish(ctx: ContextTypes.DEFAULT_TYPE):
     else:
         log.warning("discussion_post_id неизвестен — итоги только в личку")
 
-    # Итоги в личку создателю
     try:
         await ctx.bot.send_message(
             chat_id=session.admin_id,
@@ -694,8 +728,14 @@ def main():
     giveaway_conv = ConversationHandler(
         entry_points=[CommandHandler("giveaway", cmd_giveaway)],
         states={
-            Step.SELECT_CHANNEL: [CallbackQueryHandler(callback_select_channel, pattern=r"^sel_ch:")],
+            # Выбор канала — обычные кнопки через MessageHandler
+            Step.SELECT_CHANNEL: [MessageHandler(filters.TEXT & ~filters.COMMAND, step_select_channel)],
             Step.PRIZE:    [MessageHandler(filters.TEXT & ~filters.COMMAND, step_prize)],
+            # Фото — принимаем и фото и текст ("Без фото")
+            Step.PHOTO:    [
+                MessageHandler(filters.PHOTO, step_photo),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, step_photo),
+            ],
             Step.RULES:    [MessageHandler(filters.TEXT & ~filters.COMMAND, step_rules)],
             Step.DURATION: [MessageHandler(filters.TEXT & ~filters.COMMAND, step_duration)],
             Step.WINNERS:  [MessageHandler(filters.TEXT & ~filters.COMMAND, step_winners)],
