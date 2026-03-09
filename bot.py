@@ -10,11 +10,11 @@ from telegram.ext import (
     ConversationHandler, ContextTypes, filters
 )
 
-BOT_TOKEN     = "8105638057:AAF0hHZnRPdJjKi6Ydi6C-BVApA8ltNj5GU"
-CHANNEL_ID    = "@pidor_ebalay"
-DISCUSSION_ID = -1002939020236
-ADMIN_IDS     = [5423348915]  # главный админ — нельзя удалить
-ADMIN_PASSWORD = "в"   # ← поменяй на свой пароль
+BOT_TOKEN      = "8105638057:AAF0hHZnRPdJjKi6Ydi6C-BVApA8ltNj5GU"
+CHANNEL_ID     = "@pidor_ebalay"
+DISCUSSION_ID  = -1002939020236
+ADMIN_IDS      = [5423348915]
+ADMIN_PASSWORD = "в"
 
 class Step(Enum):
     PRIZE    = auto()
@@ -73,13 +73,12 @@ class GiveawaySession:
         self.discussion_post_id = discussion_post_id
         self.start_time         = datetime.now()
         self.end_time           = self.start_time + timedelta(minutes=duration_min)
-        self.all_comments: list = []   # все комментарии подряд
-        self.unique_users: dict = {}   # для подсчёта участников
+        self.all_comments: list = []
+        self.unique_users: dict = {}
 
     def register(self, user_id, name, username, msg_id, msg_time):
         if msg_time > self.end_time:
             return
-        # Каждый комментарий = отдельный шанс
         self.all_comments.append({"uid": user_id, "name": name, "username": username, "msg_id": msg_id})
         self.unique_users[user_id] = name
         log.info(f"  -> комментарий #{len(self.all_comments)} от {name}")
@@ -96,23 +95,6 @@ class GiveawaySession:
                 chosen.add(uid)
                 pool.append(entry)
         return pool
-async def find_discussion_post(bot, channel_post_id, retries=5):
-    """Ищем пересланный пост канала в группе обсуждений."""
-    for attempt in range(retries):
-        await asyncio.sleep(2)
-        try:
-            updates = await bot.get_updates(limit=20)
-            for u in reversed(updates):
-                m = u.message
-                if not m or m.chat.id != DISCUSSION_ID:
-                    continue
-                # Пересланный пост от канала
-                if m.sender_chat and m.forward_origin:
-                    log.info(f"Найден пересланный пост: msg_id={m.message_id}")
-                    return m.message_id
-        except Exception as e:
-            log.error(f"find_discussion_post attempt {attempt}: {e}")
-    return None
 
 
 async def cmd_giveaway(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -208,14 +190,35 @@ async def step_confirm(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         channel_msg = await ctx.bot.send_message(chat_id=CHANNEL_ID, text=post_text)
     except Exception as e:
         await update.message.reply_text(
-            f"Не могу написать в канал:\n{e}\n\nПроверь, что бот — администратор канала.",
+            f"Не могу написать в канал:\n{e}",
             reply_markup=ReplyKeyboardRemove()
         )
         return ConversationHandler.END
 
-    # Ищем пересланный пост в группе обсуждений
-    discussion_post_id = await find_discussion_post(ctx.bot, channel_msg.message_id)
-    log.info(f"discussion_post_id={discussion_post_id}, channel_post_id={channel_msg.message_id}")
+    # Ждём чтобы Telegram создал тред в группе обсуждений
+    await asyncio.sleep(4)
+
+    # Отправляем первый комментарий используя message_thread_id = ID поста в канале
+    # Telegram автоматически привязывает тред по этому ID
+    discussion_post_id = None
+    try:
+        first_msg = await ctx.bot.send_message(
+            chat_id=DISCUSSION_ID,
+            message_thread_id=channel_msg.message_id,
+            text=(
+                f"🎁 Розыгрыш начался!\n\n"
+                f"💬 Пиши комментарий прямо здесь чтобы участвовать\n"
+                f"⏰ Время: {d['duration']} мин\n"
+                f"🏆 Победителей: {d['winners']}\n\n"
+                f"⚡️ Больше шансов у тех кто напишет больше комментариев!"
+            )
+        )
+        # Реальный thread_id берём из ответа
+        discussion_post_id = first_msg.message_thread_id or channel_msg.message_id
+        log.info(f"Первый комментарий отправлен, thread_id={discussion_post_id}")
+    except Exception as e:
+        log.error(f"First comment error: {e}")
+        discussion_post_id = channel_msg.message_id
 
     session = GiveawaySession(
         prize=d["prize"], rules=d["rules"],
@@ -224,23 +227,6 @@ async def step_confirm(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         discussion_post_id=discussion_post_id
     )
     sessions[CHANNEL_ID] = session
-
-    # Первый комментарий — reply на пост в группе
-    try:
-        await ctx.bot.send_message(
-            chat_id=DISCUSSION_ID,
-            reply_to_message_id=discussion_post_id,
-            text=(
-                f"🎁 Розыгрыш начался!\n\n"
-                f"💬 Пиши комментарий прямо здесь чтобы участвовать\n"
-                f"⏰ Время: {d['duration']} мин\n"
-                f"🏆 Победителей: {d['winners']}\n\n"
-                f"⚡️ Больше шансов у тех кто напишет в первую и последнюю минуту!"
-            )
-        )
-        log.info("Первый комментарий отправлен как reply на пост")
-    except Exception as e:
-        log.error(f"First comment error: {e}")
 
     await update.message.reply_text(
         f"Пост опубликован!\n\nПриз: {d['prize']}\nВремя: {d['duration']} мин\nПобедителей: {d['winners']}\n\nРезультаты пришлю автоматически.",
@@ -283,13 +269,17 @@ async def handle_comment(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     msg = update.message
     if not msg: return
 
-    # Игнорируем пересланные посты из канала (автокопия)
+    # Игнорируем пересланные посты из канала
     if msg.forward_origin is not None: return
 
     session = sessions.get(CHANNEL_ID)
     if not session: return
 
-    # Анонимный админ (sender_chat) или обычный юзер
+    # Обновляем discussion_post_id из реального thread_id входящих сообщений
+    if msg.message_thread_id and session.discussion_post_id != msg.message_thread_id:
+        log.info(f"Обновляем discussion_post_id: {session.discussion_post_id} -> {msg.message_thread_id}")
+        session.discussion_post_id = msg.message_thread_id
+
     if msg.sender_chat is not None:
         uid      = msg.sender_chat.id
         name     = msg.sender_chat.title or "Аноним"
@@ -301,11 +291,9 @@ async def handle_comment(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         name     = user.full_name
         username = user.username or ""
 
-    log.info(f"Comment from {name} (id={uid})")
-
     now = datetime.now()
     session.register(uid, name, username, msg.message_id, now)
-    log.info(f"Comment ACCEPTED: {name}")
+    log.info(f"Comment ACCEPTED: {name}, thread={msg.message_thread_id}")
 
 
 async def job_reminder(ctx: ContextTypes.DEFAULT_TYPE):
@@ -314,7 +302,7 @@ async def job_reminder(ctx: ContextTypes.DEFAULT_TYPE):
     try:
         await ctx.bot.send_message(
             chat_id=DISCUSSION_ID,
-            reply_to_message_id=session.discussion_post_id,
+            message_thread_id=session.discussion_post_id,
             text=REMINDER_TEMPLATE.format(prize=ctx.job.data["prize"])
         )
     except Exception as e:
@@ -345,11 +333,11 @@ async def job_finish(ctx: ContextTypes.DEFAULT_TYPE):
         admin_username=data["admin_username"]
     )
 
-    log.info(f"Отправляю итоги как reply на discussion_post_id={session.discussion_post_id}")
+    log.info(f"Отправляю итоги в thread={session.discussion_post_id}")
     try:
         await ctx.bot.send_message(
             chat_id=DISCUSSION_ID,
-            reply_to_message_id=session.discussion_post_id,
+            message_thread_id=session.discussion_post_id,
             text=result,
             disable_web_page_preview=True
         )
@@ -368,24 +356,20 @@ async def job_finish(ctx: ContextTypes.DEFAULT_TYPE):
 
     log.info(f"Done. Winners: {[w['name'] for w in winners]}")
 
+
 async def cmd_admin(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
-    if not user:
-        return
+    if not user: return
     args = ctx.args
-
     if not args:
         await update.message.reply_text("Использование: /admin [пароль]")
         return
-
     if args[0] != ADMIN_PASSWORD:
         await update.message.reply_text("❌ Неверный пароль.")
         return
-
     if user.id in ADMIN_IDS:
         await update.message.reply_text("✅ Ты уже администратор.")
         return
-
     ADMIN_IDS.append(user.id)
     log.info(f"Новый админ: {user.full_name} ({user.id})")
     await update.message.reply_text(
@@ -401,8 +385,8 @@ async def cmd_admins(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id):
         await update.message.reply_text("❌ Только для администраторов.")
         return
-    lines = [f"{i+1}. {uid}" + (" [root]" if i==0 else "") for i, uid in enumerate(ADMIN_IDS)]
-    await update.message.reply_text("👥 Администраторы:\n" + "\n".join(lines))
+    lines = [f"{i+1}. {uid}" + (" [root]" if i == 0 else "") for i, uid in enumerate(ADMIN_IDS)]
+    await update.message.reply_text("Администраторы:\n" + "\n".join(lines))
 
 
 async def cmd_removeadmin(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -426,7 +410,6 @@ async def cmd_removeadmin(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"✅ Админ {uid} удалён.")
     else:
         await update.message.reply_text("❌ Такого админа нет.")
-
 
 
 def main():
