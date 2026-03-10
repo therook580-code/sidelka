@@ -551,7 +551,7 @@ async def handle_comment(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         try:
             await ctx.bot.send_message(
                 chat_id=session.discussion_id,
-                message_thread_id=session.discussion_post_id,
+                reply_to_message_id=session.discussion_post_id,
                 text=(
                     f"🎁 Розыгрыш начался!\n\n"
                     f"💬 Пиши комментарий прямо здесь чтобы участвовать\n"
@@ -560,7 +560,7 @@ async def handle_comment(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                     f"⚡️ Больше шансов у тех кто напишет больше комментариев!"
                 )
             )
-            log.info("✅ Приветствие отправлено!")
+            log.info(f"✅ Приветствие отправлено reply_to={session.discussion_post_id}!")
         except Exception as e:
             log.error(f"Welcome comment error: {e}")
 
@@ -596,7 +596,7 @@ async def job_reminder(ctx: ContextTypes.DEFAULT_TYPE):
     try:
         await ctx.bot.send_message(
             chat_id=session.discussion_id,
-            message_thread_id=session.discussion_post_id,
+            reply_to_message_id=session.discussion_post_id,
             text=REMINDER_TEMPLATE.format(prize=session.prize)
         )
     except Exception as e:
@@ -629,13 +629,13 @@ async def job_finish(ctx: ContextTypes.DEFAULT_TYPE):
         try:
             await ctx.bot.send_message(
                 chat_id=session.discussion_id,
-                message_thread_id=session.discussion_post_id,
+                reply_to_message_id=session.discussion_post_id,
                 text=result,
                 disable_web_page_preview=True
             )
-            log.info("Итоги отправлены в тред!")
+            log.info(f"✅ Итоги отправлены reply_to={session.discussion_post_id}!")
         except Exception as e:
-            log.error(f"Finish (discussion) error: {e}")
+            log.error(f"Finish error: {e}")
     else:
         log.warning("discussion_post_id неизвестен — итоги только в личку")
 
