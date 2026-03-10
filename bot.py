@@ -535,13 +535,19 @@ async def handle_comment(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not session: return
 
     if msg.message_thread_id is not None and not session.welcome_sent:
-        session.discussion_post_id = msg.message_thread_id
         session.welcome_sent = True
+
+        # msg.message_thread_id — это ID комментария, НЕ ID поста в группе.
+        # Реальный ID поста в группе обсуждений = msg.reply_to_message.message_id
+        # Именно его нужно передавать в message_thread_id при отправке.
         if msg.reply_to_message:
-            session.group_post_id = msg.reply_to_message.message_id
+            session.discussion_post_id = msg.reply_to_message.message_id
         else:
-            session.group_post_id = msg.message_thread_id
-        log.info(f"Thread ID: {session.discussion_post_id}, group_post_id: {session.group_post_id}")
+            session.discussion_post_id = msg.message_thread_id
+
+        log.info(f"message_thread_id={msg.message_thread_id}, reply_to={msg.reply_to_message and msg.reply_to_message.message_id}")
+        log.info(f"✅ discussion_post_id установлен: {session.discussion_post_id}")
+
         try:
             await ctx.bot.send_message(
                 chat_id=session.discussion_id,
@@ -554,11 +560,15 @@ async def handle_comment(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                     f"⚡️ Больше шансов у тех кто напишет больше комментариев!"
                 )
             )
+            log.info("✅ Приветствие отправлено!")
         except Exception as e:
             log.error(f"Welcome comment error: {e}")
 
+    # Фильтруем только комментарии из нашего треда
     if session.discussion_post_id and msg.message_thread_id != session.discussion_post_id:
-        return
+        # Также принимаем если reply_to совпадает с нашим постом
+        if not (msg.reply_to_message and msg.reply_to_message.message_id == session.discussion_post_id):
+            return
     if session.discussion_post_id is None:
         return
 
