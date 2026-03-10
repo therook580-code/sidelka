@@ -30,7 +30,40 @@ class Step(Enum):
 class AddChannelStep(Enum):
     USERNAME = auto()
 
-REMINDER_TEMPLATE = """⏰ До конца розыгрыша осталось 5 минут!
+# ── Тексты периодических сообщений (каждые 5 минут, по очереди) ─────────────
+PERIODIC_MESSAGES = [
+    """📢 РОЗЫГРЫШ ЕЩЁ ИДЁТ!
+
+    Пиши в чат чем больше сообщений тем больше шансов на выигрыш!
+    
+    звезды по 1.32₽ - @gapcjikstars_bot || Бесплатные подарки - @richygiftsbot""",
+
+    """🔥 Не упусти шанс!
+
+🎁 Разыгрываем: {prize}
+👥 Участников: {total}
+
+✍️ Оставь комментарий — и ты в игре!
+
+звезды по 1.32₽ - @gapcjikstars_bot || Бесплатные подарки - @richygiftsbot""",
+
+    """⏳ Розыгрыш в самом разгаре!
+
+🏆 Приз: {prize}
+👥 Уже участвуют: {total} человек
+
+💬 Напиши что-нибудь под постом!
+
+звезды по 1.32₽ - @gapcjikstars_bot || Бесплатные подарки - @richygiftsbot""",
+]
+
+# ── Сюда вставь свой текст напоминания за 5 минут до конца ───────────────────
+REMINDER_TEMPLATE = """До конца розыгрыша осталось 5 минут!
+
+Итоги совсем скоро
+
+
+звезды по 1.32₽ - @gapcjikstars_bot || Бесплатные подарки - @richygiftsbot
 
 🎁 {prize}
 
@@ -44,7 +77,10 @@ RESULT_TEMPLATE = """🎊 РОЗЫГРЫШ ЗАВЕРШЁН!
 🏆 ПОБЕДИТЕЛИ:
 {winners_text}
 
-Поздравляем! Напишите в личку @{admin_username} для получения приза 🎉"""
+Поздравляем! В течении нескольких минут админ выдаст приз или Напишите в личку @{admin_username} для получения приза 🎉
+
+
+звезды по 1.32₽ - @gapcjikstars_bot || Бесплатные подарки - @richygiftsbot"""
 
 logging.basicConfig(format="%(asctime)s | %(levelname)s | %(message)s", level=logging.INFO)
 log = logging.getLogger(__name__)
@@ -121,6 +157,7 @@ class GiveawaySession:
         self.end_time           = self.start_time + timedelta(minutes=duration_min)
         self.all_comments: list = []
         self.unique_users: dict = {}
+        self.periodic_index: int = 0  # счётчик для перебора PERIODIC_MESSAGES
 
     def register(self, user_id, name, username, msg_id, msg_time):
         if msg_time > self.end_time:
@@ -191,9 +228,7 @@ async def addchannel_username(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.strip()
     if not text.startswith("@"):
         text = "@" + text
-
     await update.message.reply_text(f"⏳ Проверяю канал {text}...")
-
     try:
         chat = await ctx.bot.get_chat(text)
     except Exception as e:
@@ -202,21 +237,17 @@ async def addchannel_username(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             f"Убедись что бот добавлен в канал как администратор.\n\nПопробуй снова или /cancel"
         )
         return AddChannelStep.USERNAME
-
     if chat.type != "channel":
         await update.message.reply_text(
             f"❌ {text} — это не канал. Нужно добавить именно канал.\n\nПопробуй снова или /cancel"
         )
         return AddChannelStep.USERNAME
-
     discussion_id = chat.linked_chat_id if chat.linked_chat_id else None
-
     channel_info = {
         "channel_id": text,
         "title": chat.title or text,
         "discussion_id": discussion_id
     }
-
     added = add_channel_for_admin(update.effective_user.id, channel_info)
     if not added:
         await update.message.reply_text(
@@ -224,7 +255,6 @@ async def addchannel_username(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             reply_markup=ReplyKeyboardRemove()
         )
         return ConversationHandler.END
-
     if discussion_id:
         disc_text = "✅ Группа обсуждений подключена автоматически"
     else:
@@ -234,7 +264,6 @@ async def addchannel_username(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             "добавь бота туда как администратора,\n"
             "затем удали и снова добавь канал через /addchannel"
         )
-
     await update.message.reply_text(
         f"✅ Канал {chat.title} добавлен!\n\n{disc_text}\n\n"
         f"Создавай розыгрыши командой /giveaway",
@@ -275,9 +304,7 @@ async def cmd_giveaway(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not available:
         await update.message.reply_text("❌ Во всех каналах уже идут розыгрыши!\n/stop — остановить")
         return ConversationHandler.END
-
     ctx.user_data.clear()
-
     if len(available) == 1:
         ctx.user_data["channel"] = available[0]
         await update.message.reply_text(
@@ -286,8 +313,6 @@ async def cmd_giveaway(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             reply_markup=ReplyKeyboardRemove()
         )
         return Step.PRIZE
-
-    # Несколько каналов — используем обычные кнопки (не инлайн!) чтобы не ломать ConversationHandler
     ctx.user_data["available_channels"] = available
     buttons = [[ch.get("title", ch["channel_id"])] for ch in available]
     await update.message.reply_text(
@@ -319,23 +344,19 @@ async def step_select_channel(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 async def step_prize(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     ctx.user_data["prize"] = update.message.text.strip()
-    ctx.user_data["photo_id"] = None  # по умолчанию нет фото
+    ctx.user_data["photo_id"] = None
     await update.message.reply_text(
         f"Приз: {ctx.user_data['prize']}\n\n"
         f"Шаг 2 из 5 — Фото для поста\n\n"
         f"Отправь картинку или нажми «Без фото»:",
-        reply_markup=ReplyKeyboardMarkup(
-            [["Без фото"]],
-            resize_keyboard=True, one_time_keyboard=True
-        )
+        reply_markup=ReplyKeyboardMarkup([["Без фото"]], resize_keyboard=True, one_time_keyboard=True)
     )
     return Step.PHOTO
 
 
 async def step_photo(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    # Пользователь отправил фото
     if update.message.photo:
-        photo = update.message.photo[-1]  # берём наибольшее качество
+        photo = update.message.photo[-1]
         ctx.user_data["photo_id"] = photo.file_id
         await update.message.reply_text(
             "✅ Фото сохранено!\n\nШаг 3 из 5 — Условия участия:",
@@ -346,8 +367,6 @@ async def step_photo(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             )
         )
         return Step.RULES
-
-    # Пользователь нажал «Без фото» или написал текст
     ctx.user_data["photo_id"] = None
     await update.message.reply_text(
         "Шаг 3 из 5 — Условия участия:",
@@ -366,8 +385,7 @@ async def step_rules(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "Шаг 4 из 5 — Время розыгрыша\n\nСколько минут?",
         reply_markup=ReplyKeyboardMarkup(
-            [["15", "30", "60"], ["120", "1440"]],
-            resize_keyboard=True, one_time_keyboard=True
+            [["15", "30", "60"], ["120", "1440"]], resize_keyboard=True, one_time_keyboard=True
         )
     )
     return Step.DURATION
@@ -384,8 +402,7 @@ async def step_duration(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         f"Время: {duration} мин\n\nШаг 5 из 5 — Сколько победителей?",
         reply_markup=ReplyKeyboardMarkup(
-            [["1", "2", "3"], ["5", "10"]],
-            resize_keyboard=True, one_time_keyboard=True
+            [["1", "2", "3"], ["5", "10"]], resize_keyboard=True, one_time_keyboard=True
         )
     )
     return Step.WINNERS
@@ -438,14 +455,11 @@ async def step_confirm(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     try:
         if photo_id:
             channel_msg = await ctx.bot.send_photo(
-                chat_id=ch["channel_id"],
-                photo=photo_id,
-                caption=post_text
+                chat_id=ch["channel_id"], photo=photo_id, caption=post_text
             )
         else:
             channel_msg = await ctx.bot.send_message(
-                chat_id=ch["channel_id"],
-                text=post_text
+                chat_id=ch["channel_id"], text=post_text
             )
     except Exception as e:
         await update.message.reply_text(f"❌ Не могу написать в канал:\n{e}", reply_markup=ReplyKeyboardRemove())
@@ -475,17 +489,43 @@ async def step_confirm(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     channel_key = ch["channel_id"]
     duration_sec = d["duration"] * 60
+
+    # Периодические сообщения каждые 5 минут
+    # Первое — через 5 мин, последнее — не позже чем за 5 мин до конца
     if duration_sec > 300:
-        ctx.job_queue.run_once(job_reminder, when=duration_sec - 300,
-            data={"channel_key": channel_key}, name=f"reminder_{channel_key}")
-    ctx.job_queue.run_once(job_finish, when=duration_sec,
-        data={"channel_key": channel_key}, name=f"finish_{channel_key}")
+        last_periodic = max(300, duration_sec - 300)
+        ctx.job_queue.run_repeating(
+            job_periodic,
+            interval=300,       # каждые 5 минут
+            first=300,          # первое через 5 минут после старта
+            last=last_periodic, # последнее не позже чем за 5 мин до финиша
+            data={"channel_key": channel_key},
+            name=f"periodic_{channel_key}"
+        )
+
+    # Напоминание за 5 минут до конца
+    if duration_sec > 300:
+        ctx.job_queue.run_once(
+            job_reminder, when=duration_sec - 300,
+            data={"channel_key": channel_key}, name=f"reminder_{channel_key}"
+        )
+
+    # Финал
+    ctx.job_queue.run_once(
+        job_finish, when=duration_sec,
+        data={"channel_key": channel_key}, name=f"finish_{channel_key}"
+    )
 
     ctx.user_data.clear()
     return ConversationHandler.END
 
 
 # ─── /stop ───────────────────────────────────────────────────────────────────
+
+def cancel_jobs(job_queue, channel_id: str):
+    for name in [f"periodic_{channel_id}", f"reminder_{channel_id}", f"finish_{channel_id}"]:
+        for j in job_queue.get_jobs_by_name(name):
+            j.schedule_removal()
 
 async def cmd_stop(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id):
@@ -499,8 +539,7 @@ async def cmd_stop(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if len(active) == 1:
         ch = active[0]
         sessions.pop(ch["channel_id"])
-        for name in [f"reminder_{ch['channel_id']}", f"finish_{ch['channel_id']}"]:
-            for j in ctx.job_queue.get_jobs_by_name(name): j.schedule_removal()
+        cancel_jobs(ctx.job_queue, ch["channel_id"])
         await update.message.reply_text(f"✅ Розыгрыш в {ch.get('title', ch['channel_id'])} остановлен.")
         return
     keyboard = [[InlineKeyboardButton(ch.get("title", ch["channel_id"]), callback_data=f"stop_ch:{ch['channel_id']}")]
@@ -515,8 +554,7 @@ async def callback_stop_channel(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text("❌ Розыгрыш уже завершён.")
         return
     sessions.pop(channel_id)
-    for name in [f"reminder_{channel_id}", f"finish_{channel_id}"]:
-        for j in ctx.job_queue.get_jobs_by_name(name): j.schedule_removal()
+    cancel_jobs(ctx.job_queue, channel_id)
     await query.edit_message_text("✅ Розыгрыш остановлен.")
 
 
@@ -536,10 +574,6 @@ async def handle_comment(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     if msg.message_thread_id is not None and not session.welcome_sent:
         session.welcome_sent = True
-
-        # msg.message_thread_id — это ID комментария, НЕ ID поста в группе.
-        # Реальный ID поста в группе обсуждений = msg.reply_to_message.message_id
-        # Именно его нужно передавать в message_thread_id при отправке.
         if msg.reply_to_message:
             session.discussion_post_id = msg.reply_to_message.message_id
         else:
@@ -564,9 +598,7 @@ async def handle_comment(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         except Exception as e:
             log.error(f"Welcome comment error: {e}")
 
-    # Фильтруем только комментарии из нашего треда
     if session.discussion_post_id and msg.message_thread_id != session.discussion_post_id:
-        # Также принимаем если reply_to совпадает с нашим постом
         if not (msg.reply_to_message and msg.reply_to_message.message_id == session.discussion_post_id):
             return
     if session.discussion_post_id is None:
@@ -589,7 +621,30 @@ async def handle_comment(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 # ─── Jobs ────────────────────────────────────────────────────────────────────
 
+async def job_periodic(ctx: ContextTypes.DEFAULT_TYPE):
+    """Каждые 5 минут напоминает о розыгрыше — тексты по очереди из PERIODIC_MESSAGES."""
+    channel_key = ctx.job.data["channel_key"]
+    session = sessions.get(channel_key)
+    if not session or not session.discussion_post_id: return
+    # Берём текст по индексу, после последнего — снова с первого
+    template = PERIODIC_MESSAGES[session.periodic_index % len(PERIODIC_MESSAGES)]
+    session.periodic_index += 1
+    try:
+        await ctx.bot.send_message(
+            chat_id=session.discussion_id,
+            reply_to_message_id=session.discussion_post_id,
+            text=template.format(
+                prize=session.prize,
+                total=len(session.unique_users)
+            )
+        )
+        log.info(f"Периодическое сообщение #{session.periodic_index} отправлено ({channel_key})")
+    except Exception as e:
+        log.error(f"Periodic error: {e}")
+
+
 async def job_reminder(ctx: ContextTypes.DEFAULT_TYPE):
+    """За 5 минут до конца."""
     channel_key = ctx.job.data["channel_key"]
     session = sessions.get(channel_key)
     if not session or not session.discussion_post_id: return
@@ -599,13 +654,18 @@ async def job_reminder(ctx: ContextTypes.DEFAULT_TYPE):
             reply_to_message_id=session.discussion_post_id,
             text=REMINDER_TEMPLATE.format(prize=session.prize)
         )
+        log.info(f"Напоминание за 5 мин отправлено ({channel_key})")
     except Exception as e:
         log.error(f"Reminder error: {e}")
+
 
 async def job_finish(ctx: ContextTypes.DEFAULT_TYPE):
     channel_key = ctx.job.data["channel_key"]
     session = sessions.pop(channel_key, None)
     if not session: return
+
+    # Останавливаем periodic на случай если ещё бежит
+    cancel_jobs(ctx.job_queue, channel_key)
 
     winners = session.pick_winners()
     if winners:
@@ -738,10 +798,8 @@ def main():
     giveaway_conv = ConversationHandler(
         entry_points=[CommandHandler("giveaway", cmd_giveaway)],
         states={
-            # Выбор канала — обычные кнопки через MessageHandler
             Step.SELECT_CHANNEL: [MessageHandler(filters.TEXT & ~filters.COMMAND, step_select_channel)],
             Step.PRIZE:    [MessageHandler(filters.TEXT & ~filters.COMMAND, step_prize)],
-            # Фото — принимаем и фото и текст ("Без фото")
             Step.PHOTO:    [
                 MessageHandler(filters.PHOTO, step_photo),
                 MessageHandler(filters.TEXT & ~filters.COMMAND, step_photo),
