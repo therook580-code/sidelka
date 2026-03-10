@@ -10,7 +10,8 @@ from enum import Enum, auto
 from telegram import Update, ReplyKeyboardMarkup, ReplyKeyboardRemove, InlineKeyboardMarkup, InlineKeyboardButton
 from telegram.ext import (
     Application, CommandHandler, MessageHandler,
-    ConversationHandler, ContextTypes, filters, CallbackQueryHandler
+    ConversationHandler, ContextTypes, filters, CallbackQueryHandler,
+    MessageReactionHandler
 )
 
 BOT_TOKEN      = os.environ.get("BOT_TOKEN", "8105638057:AAF0hHZnRPdJjKi6Ydi6C-BVApA8ltNj5GU")
@@ -34,36 +35,28 @@ class AddChannelStep(Enum):
 PERIODIC_MESSAGES = [
     """📢 РОЗЫГРЫШ ЕЩЁ ИДЁТ!
 
-    Пиши в чат чем больше сообщений тем больше шансов на выигрыш!
-    
-    звезды по 1.32₽ - @gapcjikstars_bot || Бесплатные подарки - @richygiftsbot""",
+🎁 {prize}
+👥 Участников уже: {total}
+
+💬 Пиши комментарий чтобы участвовать!""",
 
     """🔥 Не упусти шанс!
 
 🎁 Разыгрываем: {prize}
 👥 Участников: {total}
 
-✍️ Оставь комментарий — и ты в игре!
-
-звезды по 1.32₽ - @gapcjikstars_bot || Бесплатные подарки - @richygiftsbot""",
+✍️ Оставь комментарий — и ты в игре!""",
 
     """⏳ Розыгрыш в самом разгаре!
 
 🏆 Приз: {prize}
 👥 Уже участвуют: {total} человек
 
-💬 Напиши что-нибудь под постом!
-
-звезды по 1.32₽ - @gapcjikstars_bot || Бесплатные подарки - @richygiftsbot""",
+💬 Напиши что-нибудь под постом!""",
 ]
 
 # ── Сюда вставь свой текст напоминания за 5 минут до конца ───────────────────
-REMINDER_TEMPLATE = """До конца розыгрыша осталось 5 минут!
-
-Итоги совсем скоро
-
-
-звезды по 1.32₽ - @gapcjikstars_bot || Бесплатные подарки - @richygiftsbot
+REMINDER_TEMPLATE = """⏰ До конца розыгрыша осталось 5 минут!
 
 🎁 {prize}
 
@@ -80,7 +73,7 @@ RESULT_TEMPLATE = """🎊 РОЗЫГРЫШ ЗАВЕРШЁН!
 Поздравляем! В течении нескольких минут админ выдаст приз или Напишите в личку @{admin_username} для получения приза 🎉
 
 
-звезды по 1.32₽ - @gapcjikstars_bot || Бесплатные подарки - @richygiftsbot"""
+звезды по 1.32₽ - @gapcjikstars_bot"""
 
 logging.basicConfig(format="%(asctime)s | %(levelname)s | %(message)s", level=logging.INFO)
 log = logging.getLogger(__name__)
@@ -563,7 +556,8 @@ async def callback_stop_channel(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 async def handle_comment(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     msg = update.message
     if not msg: return
-    if msg.forward_origin is not None: return
+    # Пропускаем только пересланные сообщения из других чатов (не реакции/стикеры)
+    if msg.forward_origin is not None and msg.sticker is None and msg.animation is None: return
 
     session = None
     for ch_id, sess in sessions.items():
@@ -615,8 +609,18 @@ async def handle_comment(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         name     = user.full_name
         username = user.username or ""
 
+    msg_type = "текст"
+    if msg.sticker:
+        msg_type = f"стикер ({msg.sticker.emoji or ''})"
+    elif msg.animation:
+        msg_type = "гифка"
+    elif msg.voice:
+        msg_type = "голосовое"
+    elif msg.video_note:
+        msg_type = "видеосообщение"
+
     session.register(uid, name, username, msg.message_id, datetime.now())
-    log.info(f"Комментарий принят: {name} | thread={msg.message_thread_id} | всего={len(session.all_comments)}")
+    log.info(f"Комментарий принят [{msg_type}]: {name} | thread={msg.message_thread_id} | всего={len(session.all_comments)}")
 
 
 # ─── Jobs ────────────────────────────────────────────────────────────────────
@@ -768,6 +772,41 @@ async def cmd_cancel(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     return ConversationHandler.END
 
 
+# ─── Обработка реакций (премиум эмодзи) ─────────────────────────────────────
+
+async def handle_reaction(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Считает премиум-реакции под постом как участие в розыгрыше."""
+    reaction = update.message_reaction
+    if not reaction: return
+
+    # Ищем сессию по чату
+    session = None
+    for sess in sessions.values():
+        if reaction.chat.id == sess.discussion_id:
+            session = sess
+            break
+    if not session or not session.discussion_post_id: return
+
+    # Только реакции на наш пост
+    if reaction.message_id != session.discussion_post_id:
+        return
+
+    user = reaction.user
+    if not user or user.is_bot: return
+
+    # Только новые реакции (не удаление)
+    if not reaction.new_reaction:
+        return
+
+    uid      = user.id
+    name     = user.full_name
+    username = user.username or ""
+
+    session.register(uid, name, username, reaction.message_id, datetime.now())
+    emojis = " ".join([r.emoji if hasattr(r, "emoji") else "⭐" for r in reaction.new_reaction])
+    log.info(f"Реакция принята [{emojis}]: {name} | всего={len(session.all_comments)}")
+
+
 # ─── Health server ───────────────────────────────────────────────────────────
 
 def run_health_server():
@@ -822,8 +861,11 @@ def main():
     app.add_handler(CommandHandler("admins", cmd_admins))
     app.add_handler(CommandHandler("removeadmin", cmd_removeadmin))
     app.add_handler(CallbackQueryHandler(callback_stop_channel, pattern=r"^stop_ch:"))
+    app.add_handler(MessageReactionHandler(handle_reaction))
+    # Принимаем: текст, стикеры, гифки (анимации), голосовые, видеосообщения, эмодзи-реакции
     app.add_handler(MessageHandler(
-        filters.TEXT & ~filters.COMMAND & ~filters.UpdateType.EDITED_MESSAGE,
+        (filters.TEXT | filters.Sticker.ALL | filters.ANIMATION | filters.VOICE | filters.VIDEO_NOTE)
+        & ~filters.COMMAND & ~filters.UpdateType.EDITED_MESSAGE,
         handle_comment
     ))
 
